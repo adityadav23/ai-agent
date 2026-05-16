@@ -1,96 +1,119 @@
 from openai import OpenAI
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Optional
 import os
+
+from systemPrompt import build_system_prompt
+from tools import COMMANDS
 
 load_dotenv()
 
 
+# =========================================================
+# OUTPUT SCHEMA
+# =========================================================
+
 class AgentOutput(BaseModel):
-    step: str = Field(..., description="The step of the agent's reasoning process.")
-    input: Optional[str] = Field(None, description="The input provided to the tool, if any.")
-    content: Optional[str] = Field(None, description="The content of the agent's response.")
-    tool: Optional[str] = Field(None, description="The tool used by the agent, if any.")
+    step: str
+    input: Optional[str] = None
+    content: Optional[str] = None
+    tool: Optional[str] = None
 
 
-api_key = os.getenv("GEMINI_API_KEY")
-
-def checkEven(number: int) -> bool:
-    return number%2 == 0
+# =========================================================
+# CLIENT
+# =========================================================
 
 client = OpenAI(
-    api_key=api_key,
+    api_key=os.getenv("GEMINI_API_KEY"),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
 
-systemPrompt = """
-You are an expert AI assistant.
 
-You work in steps:
+# =========================================================
+# PROMPT
+# =========================================================
 
-START
-PLAN
-TOOL
-OBSERVE
-OUTPUT
-
-Available tools:
-
-checkEven: Takes a number as input and returns whether it is even or not.
-returns a boolean.
-Rules:
-- Only run one step at a time.
-- Wait for observation after tool call.
-"""
+systemPrompt = build_system_prompt(COMMANDS)  
 
 messageHistory = [
-    {"role": "system", "content": systemPrompt}
+    {
+        "role": "system",
+        "content": systemPrompt
+    }
 ]
 
-userInput = input("Enter a number to check if it's even: ")
-messageHistory.append({"role": "user", "content": f"{userInput} i want to check if this number is even."})
-
-availableTools = {
-    "checkEven": checkEven
+STEP_FLOW = {
+    "START": "PLAN",
+    "PLAN": "TOOL",
+    "TOOL": "OBSERVE",
+    "OBSERVE": "OUTPUT",
 }
 
 
-for _ in range(1):
+# =========================================================
+# USER INPUT
+# =========================================================
 
-    response = client.chat.completions.parse(
-        model = "gemini-3.1-flash-lite",
-        messages = messageHistory,
-        response_format = AgentOutput,
+userInput = input("Write prompt: ")
+
+messageHistory.append({
+    "role": "user",
+    "content": userInput
+})
+
+
+# =========================================================
+# AGENT LOOP
+# =========================================================
+
+for _ in range(6):
+
+    response = client.beta.chat.completions.parse(
+        model="gemini-3.1-flash-lite",
+        messages=messageHistory,
+        response_format=AgentOutput,
     )
-    step = response.choices[0].message.parsed.step  
-    tool = response.choices[0].message.parsed.tool
 
-    print(f"Step: {step}")
-    print(response.choices[0].message.parsed.content)
+    parsed = response.choices[0].message.parsed
+
+    step = parsed.step
+    tool = parsed.tool
+
+    print(f"\nSTEP: {step}")
+    print(parsed.model_dump_json(indent=2))
+
+    # VERY IMPORTANT
+    # Append assistant response properly
+    messageHistory.append({
+        "role": "assistant",
+        "content": parsed.model_dump_json()
+    })
 
     match step:
         case "START":
-            messageHistory.append({"role": "user", "content": response.choices[0].message.parsed.content})
             continue
+
         case "PLAN":
-            messageHistory.append({"role": "user", "content": response.choices[0].message.parsed.content})
             continue
+
         case "TOOL":
-            if tool in availableTools:
-                toolOutput = availableTools[tool](int(userInput))
-                messageHistory.append({"role": "user", "content": f"Tool output: {toolOutput}"})
-            else:
-                messageHistory.append({"role": "user", "content": f"Tool {tool} not found."})
-            continue
+            tool_fn = COMMANDS[parsed.tool]["function"]
+
+            tool_output = tool_fn(parsed.input)
+
+            messageHistory.append({
+                "role": "assistant",
+                "content": str(tool_output)
+            })
+
         case "OBSERVE":
-            messageHistory.append({"role": "user", "content": response.choices[0].message.parsed.content})
             continue
+
         case "OUTPUT":
-            print(f"The number is even: {response.choices[0].message.parsed.content}")
+
+            print("\nFINAL OUTPUT:")
+            print(parsed.content)
+
             break
-
-parsed = response.choices[0].message.parsed
-
-
-print(parsed.model_dump_json(indent=2))
